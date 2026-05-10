@@ -92,17 +92,125 @@ parser MyParser(packet_in packet,
 }
 
 // Dummy blocks to satisfy the compiler for now
-control MyVerifyChecksum(inout headers hdr, inout metadata meta) {}
+control MyVerifyChecksum(inout headers hdr, inout metadata meta) {
+    apply { }
+}
+/* =========================================================================
+ * 3. INGRESS PIPELINE (Tagging & Policy Engine)
+ * ========================================================================= */
 control MyIngress(inout headers hdr, inout metadata meta, inout standard_metadata_t standard_metadata) {
+    
+    // --- ACTIONS ---
+    
+    action push_vlan(bit<12> vid) {
+        hdr.vlan.setValid();
+        hdr.vlan.vid = vid;
+        hdr.vlan.pcp = 0;
+        hdr.vlan.cfi = 0;
+        // Shift the original etherType (e.g., IPv4) into the VLAN header
+        hdr.vlan.etherType = hdr.ethernet.etherType;
+        // Set the main Ethernet header to show a VLAN tag follows (0x8100)
+        hdr.ethernet.etherType = 0x8100;
+    }
+
+    action forward(egressSpec_t port) {
+        standard_metadata.egress_spec = port;
+        // Decrease TTL since we are routing between different subnets/VLANs
+        hdr.ipv4.ttl = hdr.ipv4.ttl - 1; 
+    }
+
+    action drop() {
+        mark_to_drop(standard_metadata);
+    }
+
+    // --- TABLES ---
+
+    // Table 1: Ingress Tagging
+    table ingress_port_mapping {
+        key = {
+            standard_metadata.ingress_port : exact;
+        }
+        actions = {
+            push_vlan;
+            NoAction;
+        }
+        size = 256;
+    }
+
+    // Table 2: Policy Engine & Routing
+    table policy_forwarding {
+        key = {
+            hdr.vlan.vid      : exact;    // Source VLAN ID
+            hdr.ipv4.dstAddr  : lpm;      // Destination IP (Routing)
+            hdr.ipv4.protocol : ternary;  // L4 Protocol (e.g., 17 for UDP)
+            hdr.udp.dstPort   : ternary;  // L4 Port (e.g., 53 for DNS)
+        }
+        actions = {
+            forward;
+            drop;
+            NoAction;
+        }
+        size = 1024;
+        default_action = drop; // Default security posture: drop everything
+    }
+
+    // --- PIPELINE LOGIC ---
+    
     apply {
-        // Drop everything until we write our rules
-        mark_to_drop(standard_metadata); 
+        // We only process IPv4 packets for this project
+        if (hdr.ipv4.isValid()) {
+            
+            // 1. Tag the packet if it came from an untagged access port
+            if (!hdr.vlan.isValid()) {
+                ingress_port_mapping.apply();
+            }
+            
+            // 2. Check the policy rules and route the packet
+            policy_forwarding.apply();
+        }
     }
 }
+
+/* =========================================================================
+ * 4. EGRESS PIPELINE (Tag Stripping)
+ * ========================================================================= */
 control MyEgress(inout headers hdr, inout metadata meta, inout standard_metadata_t standard_metadata) {
-    apply {}
+    
+    // --- ACTIONS ---
+    
+    action pop_vlan() {
+        // Restore the inner etherType (IPv4) back to the main Ethernet header
+        hdr.ethernet.etherType = hdr.vlan.etherType;
+        // Remove the VLAN header entirely
+        hdr.vlan.setInvalid();
+    }
+
+    // --- TABLES ---
+
+    // Table 3: Egress Tagging
+    table egress_port_mapping {
+        key = {
+            standard_metadata.egress_port : exact;
+        }
+        actions = {
+            pop_vlan;
+            NoAction;
+        }
+        size = 256;
+    }
+
+    // --- PIPELINE LOGIC ---
+
+    apply {
+        // If the packet has a VLAN tag, check if we need to strip it for the host
+        if (hdr.vlan.isValid()) {
+            egress_port_mapping.apply();
+        }
+    }
 }
-control MyComputeChecksum(inout headers hdr, inout metadata meta) {}
+control MyComputeChecksum(inout headers hdr, inout metadata meta) {
+    apply { }
+}
 control MyDeparser(packet_out packet, in headers hdr) {
     apply {
         packet.emit(hdr.ethernet);
