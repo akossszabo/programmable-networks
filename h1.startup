@@ -1,1 +1,21 @@
+#!/bin/bash
+# h1.startup - Host 1 (VLAN 10 - Client/User Segment)
+
+set -e  # Exit on error
+
+echo "[h1] Configuring network interface..."
 ip addr add 10.0.10.10/24 dev eth0
+ip link set dev eth0 address 02:00:00:00:00:01
+
+# Add routes to reach other VLAN subnets
+echo "[h1] Adding routes to other VLANs..."
+ip route add 10.0.20.0/24 dev eth0
+ip route add 10.0.30.0/24 dev eth0
+
+# STATIC ARP: Bypass ARP since our switch only reads IP/VLAN tags
+echo "[h1] Configuring static ARP..."
+arp -s 10.0.20.20 02:00:00:00:00:02
+arp -s 10.0.30.30 02:00:00:00:00:03
+
+echo "[h1] Host 1 initialization completed"
+echo "[h1] IP: 10.0.10.10/24 (VLAN 10 - Client/User Segment)"

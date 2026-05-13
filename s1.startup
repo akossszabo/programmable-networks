@@ -1,0 +1,17 @@
+#!/bin/bash
+echo "Starting Bare Minimum SDN Setup..."
+
+killall simple_switch 2>/dev/null || true
+killall simple_switch_grpc 2>/dev/null || true
+
+# 2. Compile the P4 code and put the outputs in the shared folder
+p4c-bm2-ss --p4v 16 /shared/vlan_policy.p4 -o /shared/p4config.json --p4runtime-files /shared/p4info.txtpb
+
+# 3. Start the gRPC switch in the background
+simple_switch_grpc -i 0@eth0 -i 1@eth1 -i 2@eth2 --no-p4 -- --grpc-server-addr 0.0.0.0:50051 &
+
+# Give the switch 3 seconds to wake up
+sleep 3
+
+# 4. Run the Python controller
+python3 controller.py
